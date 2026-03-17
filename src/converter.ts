@@ -100,20 +100,20 @@ export async function convertPdfToPng(inputPath: string): Promise<string> {
     })
   );
 
-  const firstImage = images[0];
-  const { width } = await firstImage.metadata();
-
-  if (!width) {
-    throw new Error('Could not determine image width');
-  }
-
   const imageBuffers = await Promise.all(
     images.map(img => img.png({ quality: 100, compressionLevel: 0 }).toBuffer())
   );
 
-  const heights = await Promise.all(
-    imageBuffers.map(buffer => sharp(buffer).metadata().then(meta => meta.height || 0))
+  const dimensions = await Promise.all(
+    imageBuffers.map(buffer => sharp(buffer).metadata().then(meta => ({ width: meta.width || 0, height: meta.height || 0 })))
   );
+
+  const width = Math.max(...dimensions.map(d => d.width));
+  const heights = dimensions.map(d => d.height);
+
+  if (!width) {
+    throw new Error('Could not determine image width');
+  }
 
   const totalHeight = heights.reduce((sum, height) => sum + height, 0);
 
