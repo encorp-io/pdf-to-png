@@ -3,12 +3,14 @@ import fs from 'fs/promises';
 import path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { randomUUID } from 'crypto';
 
 const execAsync = promisify(exec);
 
 export async function convertPdfToPng(inputPath: string, scale: number = 1.0): Promise<string> {
   const tempDir = 'temp';
-  const outputPath = path.join(tempDir, `output-${Date.now()}.png`);
+  const id = randomUUID();
+  const outputPath = path.join(tempDir, `output-${id}.png`);
 
   try {
     await fs.access(inputPath);
@@ -26,7 +28,7 @@ export async function convertPdfToPng(inputPath: string, scale: number = 1.0): P
     throw new Error(`Input PDF file not found or not accessible: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 
-  const outputPrefix = path.join(tempDir, `page-${Date.now()}`);
+  const outputPrefix = path.join(tempDir, `page-${id}`);
   let results: string[];
 
   try {
@@ -82,9 +84,7 @@ export async function convertPdfToPng(inputPath: string, scale: number = 1.0): P
     }
     await fs.copyFile(singlePagePath, outputPath);
     await fs.unlink(singlePagePath);
-    return outputPath;
-  }
-
+  } else {
   const images = await Promise.all(
     results.map(async (imagePath) => {
       try {
@@ -142,6 +142,7 @@ export async function convertPdfToPng(inputPath: string, scale: number = 1.0): P
     .composite(composite)
     .png({ quality: 100, compressionLevel: 0 })
     .toFile(outputPath);
+  }
 
   if (scale < 1) {
     const scaledPath = outputPath + '.scaled.png';

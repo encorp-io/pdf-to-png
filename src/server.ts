@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import path from 'path';
 import fs from 'fs/promises';
+import { randomUUID } from 'crypto';
 import { convertPdfToPng } from './converter';
 
 const app = express();
@@ -47,7 +48,7 @@ app.post('/convert', async (req, res) => {
     }
 
     // Create temporary input file
-    inputPath = path.join('uploads', `input-${Date.now()}.pdf`);
+    inputPath = path.join('uploads', `input-${randomUUID()}.pdf`);
     await fs.writeFile(inputPath, req.body);
 
     outputPath = await convertPdfToPng(inputPath, scale);
@@ -94,6 +95,10 @@ app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+export { app };
+
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
