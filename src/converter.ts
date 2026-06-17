@@ -6,7 +6,7 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
-export async function convertPdfToPng(inputPath: string): Promise<string> {
+export async function convertPdfToPng(inputPath: string, scale: number = 1.0): Promise<string> {
   const tempDir = 'temp';
   const outputPath = path.join(tempDir, `output-${Date.now()}.png`);
 
@@ -142,6 +142,16 @@ export async function convertPdfToPng(inputPath: string): Promise<string> {
     .composite(composite)
     .png({ quality: 100, compressionLevel: 0 })
     .toFile(outputPath);
+
+  if (scale < 1) {
+    const scaledPath = outputPath + '.scaled.png';
+    const meta = await sharp(outputPath).metadata();
+    await sharp(outputPath)
+      .resize(Math.round((meta.width || 0) * scale))
+      .png({ quality: 100, compressionLevel: 0 })
+      .toFile(scaledPath);
+    await fs.rename(scaledPath, outputPath);
+  }
 
   return outputPath;
 }

@@ -19,6 +19,13 @@ app.post('/convert', async (req, res) => {
   let inputPath: string | undefined;
   let outputPath: string | undefined;
 
+  const rawScale = req.query.scale;
+  const scale = rawScale !== undefined ? parseFloat(rawScale as string) : 1.0;
+
+  if (isNaN(scale) || scale <= 0 || scale > 1) {
+    return res.status(400).json({ error: 'scale must be a number between 0 (exclusive) and 1 (inclusive)' });
+  }
+
   try {
     if (!req.body || !Buffer.isBuffer(req.body)) {
       return res.status(400).json({ error: 'No PDF binary data received' });
@@ -43,7 +50,7 @@ app.post('/convert', async (req, res) => {
     inputPath = path.join('uploads', `input-${Date.now()}.pdf`);
     await fs.writeFile(inputPath, req.body);
 
-    outputPath = await convertPdfToPng(inputPath);
+    outputPath = await convertPdfToPng(inputPath, scale);
 
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Content-Disposition', 'attachment; filename="converted.png"');
