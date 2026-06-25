@@ -1,9 +1,14 @@
 FROM node:18-alpine
 
 # Install required system dependencies
-# poppler-utils provides pdftoppm command
+# poppler-utils provides the pdftoppm command.
+# fontconfig is needed so the optional `substituteFonts` mode can load the bundled
+# fonts via a FONTCONFIG_FILE. NOTE: no font packages are installed here on purpose —
+# nothing is added to any default font search path, so default conversion output is
+# unchanged for every existing caller. The opt-in fonts ship in the repo's fonts/ dir.
 RUN apk add --no-cache \
-    poppler-utils
+    poppler-utils \
+    fontconfig
 
 WORKDIR /app
 

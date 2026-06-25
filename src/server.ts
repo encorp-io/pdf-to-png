@@ -27,6 +27,9 @@ app.post('/convert', async (req, res) => {
     return res.status(400).json({ error: 'scale must be a number between 0 (exclusive) and 1 (inclusive)' });
   }
 
+  // Opt-in only. Absent param => false => identical behavior to previous versions.
+  const substituteFonts = req.query.substituteFonts === 'true';
+
   try {
     if (!req.body || !Buffer.isBuffer(req.body)) {
       return res.status(400).json({ error: 'No PDF binary data received' });
@@ -51,7 +54,7 @@ app.post('/convert', async (req, res) => {
     inputPath = path.join('uploads', `input-${randomUUID()}.pdf`);
     await fs.writeFile(inputPath, req.body);
 
-    outputPath = await convertPdfToPng(inputPath, scale);
+    outputPath = await convertPdfToPng(inputPath, scale, { substituteFonts });
 
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Content-Disposition', 'attachment; filename="converted.png"');
