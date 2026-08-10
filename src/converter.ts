@@ -52,6 +52,14 @@ const DEFAULT_FONT_DIR = path.resolve(__dirname, '..', 'fonts');
 const TEMP_DIR = 'temp';
 
 /**
+ * Per-page output returns every page in one response, so an uncompressed encoding scales
+ * badly: a 104-page A4 document measured 216 MB of PNG, which becomes a 288 MB JSON body
+ * once base64-encoded. At level 6 the same pages are 17 MB. Per-page output is new, so no
+ * existing caller can be affected by this default, and `compressionLevel` still overrides it.
+ */
+const PER_PAGE_DEFAULT_COMPRESSION_LEVEL = 6;
+
+/**
  * Writes a self-contained fontconfig file that exposes ONLY the bundled font directory
  * and aliases the PDF base-14 font names to their URW base-35 equivalents. Passing this
  * via FONTCONFIG_FILE fully replaces the system fontconfig for that single process, so it
@@ -296,11 +304,17 @@ export async function convertPdfToPng(inputPath: string, scale: number = 1.0, op
  * page reduced far below the requested scale, so per-page output keeps every page at the
  * size that was actually asked for.
  *
+ * Unlike the stitched entry point, this one compresses by default, at
+ * PER_PAGE_DEFAULT_COMPRESSION_LEVEL. Pass `compressionLevel` to override it.
+ *
  * The returned files live in `temp/` and the caller must delete them.
  */
 export async function convertPdfToPngPages(inputPath: string, scale: number = 1.0, options: ConvertPdfToPngOptions = {}): Promise<PdfPageImage[]> {
   const id = randomUUID();
-  const encode = pngOptions(options);
+  const encode = pngOptions({
+    ...options,
+    compressionLevel: options.compressionLevel ?? PER_PAGE_DEFAULT_COMPRESSION_LEVEL,
+  });
 
   await ensureInputAndTempDir(inputPath);
 

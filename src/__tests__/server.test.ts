@@ -377,6 +377,16 @@ describe('POST /convert — perPage', () => {
     expect(scaledBytes).toBeLessThan(fullBytes);
   });
 
+  it('returns 500 with { error } for a corrupt PDF, same as the stitched path', async () => {
+    const res = await request(app)
+      .post('/convert?perPage=true')
+      .set('Content-Type', 'application/pdf')
+      .send(Buffer.from('%PDF-1.4 this is corrupt'));
+
+    expect(res.status).toBe(500);
+    expect(res.body).toHaveProperty('error');
+  });
+
   it('cleans up every page file it created', async () => {
     const listPageFiles = (): string[] => {
       try {

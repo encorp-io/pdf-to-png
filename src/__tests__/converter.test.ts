@@ -197,6 +197,39 @@ describe('convertPdfToPngPages — per-page output (opt-in)', () => {
     }
   });
 
+  it('compresses by default, because every page travels in one response', async () => {
+    let defaults: PdfPageImage[] = [];
+    let uncompressed: PdfPageImage[] = [];
+
+    try {
+      defaults = await convertPdfToPngPages(MULTI_PAGE_PDF);
+      uncompressed = await convertPdfToPngPages(MULTI_PAGE_PDF, 1.0, { compressionLevel: 0 });
+
+      expect(await fileSize(defaults[0]!.path)).toBeLessThan(await fileSize(uncompressed[0]!.path));
+      // Compression is lossless, so the page itself must be unchanged.
+      expect((await rawPixels(defaults[0]!.path)).equals(await rawPixels(uncompressed[0]!.path))).toBe(true);
+    } finally {
+      await cleanupPages(defaults);
+      await cleanupPages(uncompressed);
+    }
+  });
+
+  it('an explicit compressionLevel overrides the per-page default', async () => {
+    let explicitZero: PdfPageImage[] = [];
+    let stitchedZero: string | undefined;
+
+    try {
+      explicitZero = await convertPdfToPngPages(SINGLE_PAGE_PDF, 1.0, { compressionLevel: 0 });
+      stitchedZero = await convertPdfToPng(SINGLE_PAGE_PDF, 1.0, { compressionLevel: 0 });
+
+      // One page, same level, same encoder: the page file matches the stitched file.
+      expect(fs.readFileSync(explicitZero[0]!.path).equals(fs.readFileSync(stitchedZero))).toBe(true);
+    } finally {
+      await cleanupPages(explicitZero);
+      if (stitchedZero) await cleanup(stitchedZero);
+    }
+  });
+
   it('a single-page PDF comes back as one page', async () => {
     let pages: PdfPageImage[] = [];
 
