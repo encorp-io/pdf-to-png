@@ -275,3 +275,130 @@ describe('POST /convert — concurrency', () => {
     expect(multiWidth).toBe(fullWidth);
   });
 });
+
+// ─────────────────────────────────────────────
+// compressionLevel parameter (opt-in)
+// ─────────────────────────────────────────────
+
+describe('POST /convert — compressionLevel', () => {
+  it('omitting it returns the same bytes as passing 0', async () => {
+    const omitted = await convertPdf(MULTI_PAGE_PDF);
+    const explicitZero = await convertPdf(MULTI_PAGE_PDF, '?compressionLevel=0');
+
+    expect(omitted.status).toBe(200);
+    expect(explicitZero.body.equals(omitted.body)).toBe(true);
+  });
+
+  it('compresses the same pixels into a smaller response', async () => {
+    const uncompressed = await convertPdf(MULTI_PAGE_PDF, '?compressionLevel=0');
+    const compressed = await convertPdf(MULTI_PAGE_PDF, '?compressionLevel=6');
+
+    expect(compressed.status).toBe(200);
+    expect(compressed.body.subarray(0, 8)).toEqual(PNG_MAGIC);
+    expect(compressed.body.length).toBeLessThan(uncompressed.body.length);
+
+    const [a, b] = await Promise.all([
+      sharp(uncompressed.body).raw().toBuffer(),
+      sharp(compressed.body).raw().toBuffer(),
+    ]);
+    expect(b.equals(a)).toBe(true);
+  });
+
+  it.each(['-1', '10', '1.5', 'abc'])('returns 400 for compressionLevel=%s', async (level) => {
+    const res = await request(app)
+      .post(`/convert?compressionLevel=${level}`)
+      .set('Content-Type', 'application/pdf')
+      .send(fs.readFileSync(SINGLE_PAGE_PDF));
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty('error');
+  });
+});
+
+// ─────────────────────────────────────────────
+// perPage parameter (opt-in)
+// ─────────────────────────────────────────────
+
+describe('POST /convert — perPage', () => {
+  it('omitting it still returns a single stitched PNG binary', async () => {
+    const res = await convertPdf(MULTI_PAGE_PDF);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('image/png');
+    expect(res.body.subarray(0, 8)).toEqual(PNG_MAGIC);
+  });
+
+  it('perPage=true returns JSON with one base64 PNG per page', async () => {
+    const res = await request(app)
+      .post('/convert?perPage=true')
+      .set('Content-Type', 'application/pdf')
+      .send(fs.readFileSync(MULTI_PAGE_PDF));
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('application/json');
+    expect(res.body.count).toBeGreaterThan(1);
+    expect(res.body.pages).toHaveLength(res.body.count);
+
+    for (const [index, page] of res.body.pages.entries()) {
+      expect(page.page).toBe(index + 1);
+      const buffer = Buffer.from(page.data, 'base64');
+      expect(buffer.subarray(0, 8)).toEqual(PNG_MAGIC);
+      const meta = await sharp(buffer).metadata();
+      expect(meta.width).toBe(page.width);
+      expect(meta.height).toBe(page.height);
+    }
+  });
+
+  it('the pages add up to the stitched image', async () => {
+    const stitched = await convertPdf(MULTI_PAGE_PDF);
+    const perPage = await request(app)
+      .post('/convert?perPage=true')
+      .set('Content-Type', 'application/pdf')
+      .send(fs.readFileSync(MULTI_PAGE_PDF));
+
+    const meta = await sharp(stitched.body).metadata();
+    const summedHeight = perPage.body.pages.reduce((sum: number, page: { height: number }) => sum + page.height, 0);
+    expect(summedHeight).toBe(meta.height);
+    expect(perPage.body.pages[0].width).toBe(meta.width);
+  });
+
+  it('perPage=true honours scale and compressionLevel together', async () => {
+    const full = await request(app)
+      .post('/convert?perPage=true')
+      .set('Content-Type', 'application/pdf')
+      .send(fs.readFileSync(MULTI_PAGE_PDF));
+    const scaled = await request(app)
+      .post('/convert?perPage=true&scale=0.5&compressionLevel=6')
+      .set('Content-Type', 'application/pdf')
+      .send(fs.readFileSync(MULTI_PAGE_PDF));
+
+    expect(scaled.status).toBe(200);
+    expect(scaled.body.pages[0].width).toBe(Math.round(full.body.pages[0].width * 0.5));
+    const fullBytes = Buffer.from(full.body.pages[0].data, 'base64').length;
+    const scaledBytes = Buffer.from(scaled.body.pages[0].data, 'base64').length;
+    expect(scaledBytes).toBeLessThan(fullBytes);
+  });
+
+  it('cleans up every page file it created', async () => {
+    const listPageFiles = (): string[] => {
+      try {
+        return fs.readdirSync('temp').filter(file => /-page-\d+\.png$/.test(file));
+      } catch {
+        return [];
+      }
+    };
+
+    await request(app)
+      .post('/convert?perPage=true')
+      .set('Content-Type', 'application/pdf')
+      .send(fs.readFileSync(MULTI_PAGE_PDF));
+
+    // The converter suite runs in parallel and shares this temp dir, so give its own
+    // files a moment to clear. A genuine leak never clears and still fails here.
+    let remaining = listPageFiles();
+    for (let attempt = 0; attempt < 20 && remaining.length > 0; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      remaining = listPageFiles();
+    }
+
+    expect(remaining).toEqual([]);
+  });
+});
