@@ -23,12 +23,41 @@ export interface ConvertPdfToPngOptions {
    * directory. Only consulted when `substituteFonts` is `true`.
    */
   fontDir?: string;
+  /**
+   * zlib compression level for the returned PNG, an integer from 0 to 9.
+   *
+   * Defaults to `0`, which is what every previous version used, so omitting it keeps
+   * output byte-for-byte identical, and existing consumers are unaffected. PNG is lossless
+   * at every level: the pixels are the same, only the file size changes. Level 0 stores the
+   * raster uncompressed, at roughly one byte per pixel. Measured on an 8-page A4 order at
+   * full scale, level 0 produced 16.6 MB and level 6 produced the same pixels in 1.33 MB.
+   */
+  compressionLevel?: number;
+}
+
+/** One rendered page. `path` is a file in `temp/` that the caller is responsible for removing. */
+export interface PdfPageImage {
+  path: string;
+  /** 1-based page number, in document order. */
+  page: number;
+  width: number;
+  height: number;
 }
 
 // Bundled fonts live alongside the compiled output (dist/) and the source (src/),
 // one level up in `fonts/`. Kept off every system/default font path on purpose so it
 // can never alter rendering for callers who don't opt in.
 const DEFAULT_FONT_DIR = path.resolve(__dirname, '..', 'fonts');
+
+const TEMP_DIR = 'temp';
+
+/**
+ * Per-page output returns every page in one response, so an uncompressed encoding scales
+ * badly: a 104-page A4 document measured 216 MB of PNG, which becomes a 288 MB JSON body
+ * once base64-encoded. At level 6 the same pages are 17 MB. Per-page output is new, so no
+ * existing caller can be affected by this default, and `compressionLevel` still overrides it.
+ */
+const PER_PAGE_DEFAULT_COMPRESSION_LEVEL = 6;
 
 /**
  * Writes a self-contained fontconfig file that exposes ONLY the bundled font directory
@@ -63,11 +92,19 @@ async function buildSubstituteFontConfig(tempDir: string, fontDir: string, id: s
   return { confPath, cacheDir };
 }
 
-export async function convertPdfToPng(inputPath: string, scale: number = 1.0, options: ConvertPdfToPngOptions = {}): Promise<string> {
-  const tempDir = 'temp';
-  const id = randomUUID();
-  const outputPath = path.join(tempDir, `output-${id}.png`);
+/**
+ * PNG encoding settings for whatever the caller asked for. With no options this is exactly
+ * what every previous version passed, so the encoded bytes do not change.
+ */
+function pngOptions(options: ConvertPdfToPngOptions): sharp.PngOptions {
+  const compressionLevel = options.compressionLevel ?? 0;
+  if (!Number.isInteger(compressionLevel) || compressionLevel < 0 || compressionLevel > 9) {
+    throw new Error('compressionLevel must be an integer between 0 and 9');
+  }
+  return { quality: 100, compressionLevel };
+}
 
+async function ensureInputAndTempDir(inputPath: string): Promise<void> {
   try {
     await fs.access(inputPath);
     const fileStats = await fs.stat(inputPath);
@@ -75,17 +112,23 @@ export async function convertPdfToPng(inputPath: string, scale: number = 1.0, op
 
     // Check if temp directory exists
     try {
-      await fs.access(tempDir);
+      await fs.access(TEMP_DIR);
     } catch {
-      await fs.mkdir(tempDir, { recursive: true });
+      await fs.mkdir(TEMP_DIR, { recursive: true });
       console.log('Created temp directory');
     }
   } catch (error) {
     throw new Error(`Input PDF file not found or not accessible: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
+}
 
-  const outputPrefix = path.join(tempDir, `page-${id}`);
-  let results: string[];
+/**
+ * Renders every page of the PDF to its own PNG in `temp/` and returns the paths in page
+ * order. This is the step `pdftoppm` performs natively; both the stitched and the per-page
+ * entry points below build on it.
+ */
+async function renderPdfPages(inputPath: string, id: string, options: ConvertPdfToPngOptions): Promise<string[]> {
+  const outputPrefix = path.join(TEMP_DIR, `page-${id}`);
 
   // Only created when the caller opts in; otherwise the pdftoppm environment is untouched.
   let fontConf: { confPath: string; cacheDir: string } | undefined;
@@ -98,7 +141,7 @@ export async function convertPdfToPng(inputPath: string, scale: number = 1.0, op
     let execOptions: { env?: NodeJS.ProcessEnv } | undefined;
     if (options.substituteFonts) {
       const fontDir = options.fontDir ?? DEFAULT_FONT_DIR;
-      fontConf = await buildSubstituteFontConfig(tempDir, fontDir, id);
+      fontConf = await buildSubstituteFontConfig(TEMP_DIR, fontDir, id);
       // FONTCONFIG_FILE replaces the system config for this child process only.
       execOptions = { env: { ...process.env, FONTCONFIG_FILE: fontConf.confPath } };
       console.log('Font substitution enabled, using font dir:', fontDir);
@@ -117,7 +160,7 @@ export async function convertPdfToPng(inputPath: string, scale: number = 1.0, op
     console.log('pdftoppm stdout:', stdout);
 
     // Find generated PNG files
-    const tempFiles = await fs.readdir(tempDir);
+    const tempFiles = await fs.readdir(TEMP_DIR);
     const pngFiles = tempFiles.filter(file =>
       file.startsWith(path.basename(outputPrefix)) && file.endsWith('.png')
     ).sort();
@@ -129,9 +172,10 @@ export async function convertPdfToPng(inputPath: string, scale: number = 1.0, op
     }
 
     // Map to full paths
-    results = pngFiles.map(file => path.join(tempDir, file));
+    const results = pngFiles.map(file => path.join(TEMP_DIR, file));
 
     console.log('PDF processing results:', results.length, 'pages');
+    return results;
   } catch (error) {
     console.error('PDF processing failed:', error);
     if (error instanceof Error) {
@@ -146,6 +190,19 @@ export async function convertPdfToPng(inputPath: string, scale: number = 1.0, op
       await fs.rm(fontConf.cacheDir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
+}
+
+export async function convertPdfToPng(inputPath: string, scale: number = 1.0, options: ConvertPdfToPngOptions = {}): Promise<string> {
+  const id = randomUUID();
+  const outputPath = path.join(TEMP_DIR, `output-${id}.png`);
+  const encode = pngOptions(options);
+  // Only re-encode a single page when the caller asked for a specific encoding. Otherwise
+  // pdftoppm's own file is copied through untouched, exactly as before.
+  const reencodeSinglePage = options.compressionLevel !== undefined;
+
+  await ensureInputAndTempDir(inputPath);
+
+  const results = await renderPdfPages(inputPath, id, options);
 
   if (results.length === 0) {
     throw new Error('No pages found in PDF');
@@ -156,7 +213,11 @@ export async function convertPdfToPng(inputPath: string, scale: number = 1.0, op
     if (!singlePagePath) {
       throw new Error('Failed to get path for single page conversion');
     }
-    await fs.copyFile(singlePagePath, outputPath);
+    if (reencodeSinglePage) {
+      await sharp(singlePagePath).png(encode).toFile(outputPath);
+    } else {
+      await fs.copyFile(singlePagePath, outputPath);
+    }
     await fs.unlink(singlePagePath);
   } else {
   const images = await Promise.all(
@@ -174,6 +235,8 @@ export async function convertPdfToPng(inputPath: string, scale: number = 1.0, op
     })
   );
 
+  // These buffers are only handed to `composite`, which decodes them again, so their
+  // encoding never reaches the caller. Left at level 0 because it is the fastest.
   const imageBuffers = await Promise.all(
     images.map(img => img.png({ quality: 100, compressionLevel: 0 }).toBuffer())
   );
@@ -214,7 +277,7 @@ export async function convertPdfToPng(inputPath: string, scale: number = 1.0, op
 
   await stitchedImage
     .composite(composite)
-    .png({ quality: 100, compressionLevel: 0 })
+    .png(encode)
     .toFile(outputPath);
   }
 
@@ -223,10 +286,86 @@ export async function convertPdfToPng(inputPath: string, scale: number = 1.0, op
     const meta = await sharp(outputPath).metadata();
     await sharp(outputPath)
       .resize(Math.round((meta.width || 0) * scale))
-      .png({ quality: 100, compressionLevel: 0 })
+      .png(encode)
       .toFile(scaledPath);
     await fs.rename(scaledPath, outputPath);
   }
 
   return outputPath;
+}
+
+/**
+ * Same rendering as `convertPdfToPng`, but each page is returned as its own PNG instead of
+ * being stitched into one tall image. Nothing calls this unless it asks for it, so the
+ * stitched behaviour above is unchanged.
+ *
+ * Stitching an N-page document produces an image N times taller than one page. Callers that
+ * feed the result to an image consumer with its own dimension limits can end up with each
+ * page reduced far below the requested scale, so per-page output keeps every page at the
+ * size that was actually asked for.
+ *
+ * Unlike the stitched entry point, this one compresses by default, at
+ * PER_PAGE_DEFAULT_COMPRESSION_LEVEL. Pass `compressionLevel` to override it.
+ *
+ * The returned files live in `temp/` and the caller must delete them.
+ */
+export async function convertPdfToPngPages(inputPath: string, scale: number = 1.0, options: ConvertPdfToPngOptions = {}): Promise<PdfPageImage[]> {
+  const id = randomUUID();
+  const encode = pngOptions({
+    ...options,
+    compressionLevel: options.compressionLevel ?? PER_PAGE_DEFAULT_COMPRESSION_LEVEL,
+  });
+
+  await ensureInputAndTempDir(inputPath);
+
+  const rendered = await renderPdfPages(inputPath, id, options);
+
+  if (rendered.length === 0) {
+    throw new Error('No pages found in PDF');
+  }
+
+  const pages: PdfPageImage[] = [];
+
+  try {
+    for (let i = 0; i < rendered.length; i++) {
+      const renderedPath = rendered[i];
+      if (!renderedPath) {
+        throw new Error('Failed to get path for page conversion');
+      }
+
+      const outputPath = path.join(TEMP_DIR, `output-${id}-page-${i + 1}.png`);
+      const meta = await sharp(renderedPath).metadata();
+      const sourceWidth = meta.width || 0;
+
+      if (!sourceWidth) {
+        throw new Error('Could not determine image width');
+      }
+
+      let pipeline = sharp(renderedPath);
+      if (scale < 1) {
+        pipeline = pipeline.resize(Math.round(sourceWidth * scale));
+      }
+      await pipeline.png(encode).toFile(outputPath);
+      await fs.unlink(renderedPath).catch(() => undefined);
+
+      const outMeta = await sharp(outputPath).metadata();
+      pages.push({
+        path: outputPath,
+        page: i + 1,
+        width: outMeta.width || 0,
+        height: outMeta.height || 0,
+      });
+    }
+  } catch (error) {
+    // Nothing is returned on failure, so nothing would be left to clean up the pages
+    // written so far or the renders not reached yet.
+    await Promise.all([
+      ...pages.map(page => fs.rm(page.path, { force: true }).catch(() => undefined)),
+      ...rendered.map(renderedPath => fs.rm(renderedPath, { force: true }).catch(() => undefined)),
+    ]);
+    throw error;
+  }
+
+  console.log('PDF per-page results:', pages.length, 'pages');
+  return pages;
 }

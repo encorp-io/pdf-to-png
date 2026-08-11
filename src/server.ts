@@ -4,7 +4,7 @@ import helmet from 'helmet';
 import path from 'path';
 import fs from 'fs/promises';
 import { randomUUID } from 'crypto';
-import { convertPdfToPng } from './converter';
+import { convertPdfToPng, convertPdfToPngPages } from './converter';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,6 +19,7 @@ app.use(express.raw({
 app.post('/convert', async (req, res) => {
   let inputPath: string | undefined;
   let outputPath: string | undefined;
+  let pagePaths: string[] = [];
 
   const rawScale = req.query.scale;
   const scale = rawScale !== undefined ? parseFloat(rawScale as string) : 1.0;
@@ -29,6 +30,19 @@ app.post('/convert', async (req, res) => {
 
   // Opt-in only. Absent param => false => identical behavior to previous versions.
   const substituteFonts = req.query.substituteFonts === 'true';
+
+  // Opt-in only. Absent param => one stitched PNG, exactly as before.
+  const perPage = req.query.perPage === 'true';
+
+  // Opt-in only. Absent param => level 0 => byte-identical output to previous versions.
+  const rawCompressionLevel = req.query.compressionLevel;
+  let compressionLevel: number | undefined;
+  if (rawCompressionLevel !== undefined) {
+    compressionLevel = Number(rawCompressionLevel);
+    if (!Number.isInteger(compressionLevel) || compressionLevel < 0 || compressionLevel > 9) {
+      return res.status(400).json({ error: 'compressionLevel must be an integer between 0 and 9' });
+    }
+  }
 
   try {
     if (!req.body || !Buffer.isBuffer(req.body)) {
@@ -54,7 +68,21 @@ app.post('/convert', async (req, res) => {
     inputPath = path.join('uploads', `input-${randomUUID()}.pdf`);
     await fs.writeFile(inputPath, req.body);
 
-    outputPath = await convertPdfToPng(inputPath, scale, { substituteFonts });
+    if (perPage) {
+      const pages = await convertPdfToPngPages(inputPath, scale, { substituteFonts, compressionLevel });
+      pagePaths = pages.map(page => page.path);
+
+      const encoded = await Promise.all(pages.map(async page => ({
+        page: page.page,
+        width: page.width,
+        height: page.height,
+        data: (await fs.readFile(page.path)).toString('base64'),
+      })));
+
+      return res.json({ count: encoded.length, pages: encoded });
+    }
+
+    outputPath = await convertPdfToPng(inputPath, scale, { substituteFonts, compressionLevel });
 
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Content-Disposition', 'attachment; filename="converted.png"');
@@ -89,6 +117,14 @@ app.post('/convert', async (req, res) => {
         await fs.unlink(outputPath);
       } catch (cleanupError) {
         console.error('Failed to cleanup output file:', cleanupError);
+      }
+    }
+
+    for (const pagePath of pagePaths) {
+      try {
+        await fs.unlink(pagePath);
+      } catch (cleanupError) {
+        console.error('Failed to cleanup page file:', cleanupError);
       }
     }
   }
