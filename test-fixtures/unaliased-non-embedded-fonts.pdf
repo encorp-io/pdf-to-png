@@ -1,0 +1,42 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /FA 5 0 R /FN 6 0 R /FT 7 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 192 >>
+stream
+BT /FA 24 Tf 60 760 Td (Aliased control line: Arial 12345) Tj ET
+BT /FN 24 Tf 60 700 Td (Unaliased narrow: ArialNarrow 12345) Tj ET
+BT /FT 24 Tf 60 640 Td (Unaliased sans: Tahoma 12345) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /TrueType /BaseFont /Arial /Encoding /WinAnsiEncoding /FirstChar 32 /LastChar 255 >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /TrueType /BaseFont /ArialNarrow /Encoding /WinAnsiEncoding /FirstChar 32 /LastChar 255 >>
+endobj
+7 0 obj
+<< /Type /Font /Subtype /TrueType /BaseFont /Tahoma /Encoding /WinAnsiEncoding /FirstChar 32 /LastChar 255 >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000261 00000 n 
+0000000503 00000 n 
+0000000627 00000 n 
+0000000757 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+882
+%%EOF

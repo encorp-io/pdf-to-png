@@ -3,7 +3,8 @@ import fsp from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import sharp from 'sharp';
-import { convertPdfToPng, convertPdfToPngPages, PdfPageImage } from '../converter';
+import { execFileSync } from 'child_process';
+import { buildSubstituteFontConfig, convertPdfToPng, convertPdfToPngPages, PdfPageImage } from '../converter';
 
 // This PDF references the standard PDF base-14 fonts (Helvetica / Helvetica-Bold)
 // WITHOUT embedding them. On a host with no matching system fonts, poppler renders
@@ -252,6 +253,187 @@ describe('convertPdfToPngPages — per-page output (opt-in)', () => {
       expect(after).toEqual(before);
     } finally {
       await cleanupPages(pages);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// Font FALLBACK — the opt-in `fontFallback` mode, distinct from `substituteFonts` above.
+//
+// The generated fontconfig file fully replaces the host config, so it also has to supply the
+// generic-family fallback layer a full fontconfig installation provides. Without it, a family
+// the file does not alias by hand matches nothing and fontconfig returns whatever sorts first
+// in the bundled directory, which is D050000L — URW's ZapfDingbats clone. A customer order
+// referencing non-embedded ArialNarrow and Tahoma rendered its item lines, quantities and
+// dimensions as dingbats; pdftoppm exited 0, and the ink-based test above passed, because
+// dingbats are ink too.
+//
+// The mode is opt-in: with the flag absent the generated file must stay byte-for-byte what
+// previous versions wrote, because other programs call this service.
+// ---------------------------------------------------------------------------------------
+
+const UNALIASED_FONTS_PDF = path.join(__dirname, '../../test-fixtures/unaliased-non-embedded-fonts.pdf');
+const DEFAULT_FONTS_DIR = path.join(__dirname, '../../fonts');
+const DINGBATS_FONT_FILE = path.join(DEFAULT_FONTS_DIR, 'D050000L.otf');
+
+/** Which font file the generated config actually resolves a family name to. */
+function resolveFamily(confPath: string, family: string): string {
+  const out = execFileSync('fc-match', [family], {
+    env: { ...process.env, FONTCONFIG_FILE: confPath },
+    encoding: 'utf8',
+  });
+  return out.split(':')[0]!.trim();
+}
+
+async function withGeneratedConfig<T>(
+  fontFallback: boolean,
+  fn: (confPath: string) => Promise<T> | T,
+): Promise<T> {
+  const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'pdf2png-fontconf-'));
+  const { confPath, cacheDir } = await buildSubstituteFontConfig(tempDir, DEFAULT_FONTS_DIR, 'test', fontFallback);
+  try {
+    return await fn(confPath);
+  } finally {
+    await fsp.rm(cacheDir, { recursive: true, force: true }).catch(() => undefined);
+    await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+describe('buildSubstituteFontConfig — default path is unchanged', () => {
+  it('emits exactly the aliases previous versions emitted, and nothing else', async () => {
+    const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'pdf2png-fontconf-'));
+    const { confPath, cacheDir } = await buildSubstituteFontConfig(tempDir, DEFAULT_FONTS_DIR, 'x');
+    try {
+      const conf = await fsp.readFile(confPath, 'utf8');
+      // The literal file previous versions wrote. Pinned in full on purpose: any edit to the
+      // template that reaches the default path has to fail here, loudly, before it can change
+      // output for a caller that never opted in.
+      const expected = [
+        '<?xml version="1.0"?>',
+        '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">',
+        '<fontconfig>',
+        `  <dir>${path.resolve(DEFAULT_FONTS_DIR)}</dir>`,
+        `  <cachedir>${cacheDir}</cachedir>`,
+        '  <alias binding="same"><family>Helvetica</family><accept><family>Nimbus Sans</family></accept></alias>',
+        '  <alias binding="same"><family>Arial</family><accept><family>Nimbus Sans</family></accept></alias>',
+        '  <alias binding="same"><family>Times</family><accept><family>Nimbus Roman</family></accept></alias>',
+        '  <alias binding="same"><family>Times New Roman</family><accept><family>Nimbus Roman</family></accept></alias>',
+        '  <alias binding="same"><family>Courier</family><accept><family>Nimbus Mono PS</family></accept></alias>',
+        '  <alias binding="same"><family>Courier New</family><accept><family>Nimbus Mono PS</family></accept></alias>',
+        '  <alias binding="same"><family>Symbol</family><accept><family>Standard Symbols PS</family></accept></alias>',
+        '  <alias binding="same"><family>ZapfDingbats</family><accept><family>Dingbats</family></accept></alias>',
+        '</fontconfig>',
+        '',
+      ].join('\n');
+      expect(conf).toBe(expected);
+    } finally {
+      await fsp.rm(cacheDir, { recursive: true, force: true }).catch(() => undefined);
+      await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it('still resolves an unaliased family to Dingbats, the behaviour existing callers have', async () => {
+    await withGeneratedConfig(false, confPath => {
+      expect(resolveFamily(confPath, 'ArialNarrow')).toBe('D050000L.otf');
+      expect(resolveFamily(confPath, 'Tahoma')).toBe('D050000L.otf');
+    });
+  });
+
+  it('renders a PDF of unaliased fonts identically with the flag absent and explicitly false', async () => {
+    const implicitPath = await convertPdfToPng(UNALIASED_FONTS_PDF, 1.0, { substituteFonts: true });
+    const explicitPath = await convertPdfToPng(UNALIASED_FONTS_PDF, 1.0, {
+      substituteFonts: true,
+      fontFallback: false,
+    });
+    try {
+      expect(Buffer.compare(await rawPixels(implicitPath), await rawPixels(explicitPath))).toBe(0);
+    } finally {
+      await cleanup(implicitPath);
+      await cleanup(explicitPath);
+    }
+  });
+});
+
+describe('buildSubstituteFontConfig — fontFallback: true', () => {
+  it('never resolves an unaliased family to the Dingbats face', async () => {
+    // Real families seen on incoming customer orders, none of them aliased by name.
+    const unaliased = ['ArialNarrow', 'Arial Narrow', 'Tahoma', 'Verdana', 'Calibri', 'Segoe UI', 'Frutiger'];
+
+    await withGeneratedConfig(true, confPath => {
+      const resolved = Object.fromEntries(unaliased.map(f => [f, resolveFamily(confPath, f)]));
+
+      for (const file of Object.values(resolved)) {
+        expect(file).not.toBe('D050000L.otf');
+        // And it must be a real face from the bundled directory, not an empty result.
+        expect(file).toMatch(/\.otf$/);
+      }
+
+      // A narrow family keeps its width rather than widening to the regular sans.
+      expect(resolved['ArialNarrow']).toBe('NimbusSansNarrow-Regular.otf');
+      expect(resolved['Arial Narrow']).toBe('NimbusSansNarrow-Regular.otf');
+    });
+  });
+
+  it('leaves every base-14 mapping, including ZapfDingbats, where it was', async () => {
+    const expected: Record<string, string> = {
+      Helvetica: 'NimbusSans-Regular.otf',
+      Arial: 'NimbusSans-Regular.otf',
+      Times: 'NimbusRoman-Regular.otf',
+      'Times New Roman': 'NimbusRoman-Regular.otf',
+      Courier: 'NimbusMonoPS-Regular.otf',
+      'Courier New': 'NimbusMonoPS-Regular.otf',
+      Symbol: 'StandardSymbolsPS.otf',
+      // A PDF that genuinely asks for dingbats must still get them. The historical alias names
+      // a family called "Dingbats", which no bundled font reports; it resolved correctly only
+      // via the same accident this mode removes, so the mode re-points it by real family name.
+      ZapfDingbats: 'D050000L.otf',
+    };
+
+    await withGeneratedConfig(true, confPath => {
+      for (const [family, file] of Object.entries(expected)) {
+        expect(resolveFamily(confPath, family)).toBe(file);
+      }
+    });
+  });
+
+  it('resolves the generic families the bundled directory does not define itself', async () => {
+    await withGeneratedConfig(true, confPath => {
+      expect(resolveFamily(confPath, 'sans-serif')).toBe('NimbusSans-Regular.otf');
+      expect(resolveFamily(confPath, 'serif')).toBe('NimbusRoman-Regular.otf');
+      expect(resolveFamily(confPath, 'monospace')).toBe('NimbusMonoPS-Regular.otf');
+    });
+  });
+
+  it('renders a PDF of unaliased non-embedded fonts as text, not as dingbats', async () => {
+    // Deterministic on any host: both renders read only from bundled fonts. The dingbats-only
+    // directory reproduces the default behaviour, where every family falls through to D050000L.
+    const dingbatsOnlyDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'pdf2png-dingbats-'));
+    await fsp.copyFile(DINGBATS_FONT_FILE, path.join(dingbatsOnlyDir, 'D050000L.otf'));
+
+    const dingbatsPath = await convertPdfToPng(UNALIASED_FONTS_PDF, 1.0, {
+      substituteFonts: true,
+      fontDir: dingbatsOnlyDir,
+    });
+    const fixedPath = await convertPdfToPng(UNALIASED_FONTS_PDF, 1.0, {
+      substituteFonts: true,
+      fontFallback: true,
+    });
+
+    try {
+      // Same page, same geometry — only the glyphs differ.
+      expect(await dimensions(fixedPath)).toEqual(await dimensions(dingbatsPath));
+
+      // The two renders must not be the same pixels. If they are, the fallback regressed and
+      // the unaliased lines are being drawn with the Dingbats face again.
+      expect(Buffer.compare(await rawPixels(fixedPath), await rawPixels(dingbatsPath))).not.toBe(0);
+
+      // Dingbat glyphs are solid symbols and carry markedly more ink than the letters they
+      // replaced. Text must therefore be the lighter of the two.
+      expect(await darkPixelCount(fixedPath)).toBeLessThan(await darkPixelCount(dingbatsPath));
+    } finally {
+      await cleanup(dingbatsPath);
+      await cleanup(fixedPath);
+      await fsp.rm(dingbatsOnlyDir, { recursive: true, force: true }).catch(() => undefined);
     }
   });
 });
