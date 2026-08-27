@@ -24,6 +24,21 @@ export interface ConvertPdfToPngOptions {
    */
   fontDir?: string;
   /**
+   * Also supply the generic-family fallback layer that a full fontconfig installation
+   * provides, so a font family the bundled config does not name by hand resolves to a text
+   * face instead of to URW Dingbats.
+   *
+   * Defaults to `false`. When `false`/omitted the generated fontconfig file is byte-for-byte
+   * what previous versions wrote, so `substituteFonts` output does not change for any
+   * existing caller. Only consulted when `substituteFonts` is `true`.
+   *
+   * Opt in when a PDF names non-embedded fonts beyond the base-14 set — ArialNarrow, Tahoma,
+   * Verdana, Calibri and the like. Note that turning it on also stops an unnamed family
+   * reaching the Dingbats face at all, which is the one behaviour a PDF asking for symbols by
+   * an unaliased name relied on.
+   */
+  fontFallback?: boolean;
+  /**
    * zlib compression level for the returned PNG, an integer from 0 to 9.
    *
    * Defaults to `0`, which is what every previous version used, so omitting it keeps
@@ -60,12 +75,73 @@ const TEMP_DIR = 'temp';
 const PER_PAGE_DEFAULT_COMPRESSION_LEVEL = 6;
 
 /**
+ * Font families that a PDF may name without embedding, and the bundled face each should
+ * resolve to. Only consulted when `fontFallback` is on. Kept separate from the base-14
+ * aliases above it so the opt-out path can emit the historical config unchanged.
+ */
+const EXTRA_FAMILY_ALIASES: ReadonlyArray<readonly [string, string]> = [
+  // Condensed faces, so a narrow family keeps its width instead of widening to the regular
+  // sans via the catch-all. Poppler strips the ",Style" suffix off a PDF BaseFont and asks
+  // for the family unspaced, so "ArialNarrow" is the spelling that actually arrives; the
+  // spaced spellings are here for callers that normalise it.
+  ['ArialNarrow', 'Nimbus Sans Narrow'],
+  ['Arial Narrow', 'Nimbus Sans Narrow'],
+  ['HelveticaNarrow', 'Nimbus Sans Narrow'],
+  ['Helvetica Narrow', 'Nimbus Sans Narrow'],
+  // URW's ZapfDingbats clone reports its family as "D050000L", not "Dingbats", so the
+  // long-standing ZapfDingbats alias above matches no bundled font. It resolved correctly
+  // only because an unmatched family fell through to D050000L by accident — the same
+  // accident this mode removes. Re-point it by the real family name, or turning the
+  // fallback on would silently replace genuine dingbats with letters.
+  ['ZapfDingbats', 'D050000L'],
+  ['Dingbats', 'D050000L'],
+  // The generic families, which the bundled directory does not define on its own.
+  ['sans-serif', 'Nimbus Sans'],
+  ['serif', 'Nimbus Roman'],
+  ['monospace', 'Nimbus Mono PS'],
+];
+
+function aliasLine(family: string, accept: string): string {
+  return `  <alias binding="same"><family>${family}</family><accept><family>${accept}</family></accept></alias>`;
+}
+
+/**
+ * The fallback layer a full fontconfig installation supplies in 49-sansserif.conf: append a
+ * weak sans-serif to any pattern that names no generic family, so an unmatched family ends
+ * up on a text face. It has to PRECEDE the generic aliases, exactly as Debian's numbering
+ * (49 before 60) arranges it — fontconfig applies pattern rules in document order, so a
+ * sans-serif appended after the sans-serif alias has already run is never expanded.
+ */
+const GENERIC_FALLBACK_RULE = `  <match target="pattern">
+    <test qual="all" name="family" compare="not_eq"><string>sans-serif</string></test>
+    <test qual="all" name="family" compare="not_eq"><string>serif</string></test>
+    <test qual="all" name="family" compare="not_eq"><string>monospace</string></test>
+    <edit name="family" mode="append_last" binding="weak"><string>sans-serif</string></edit>
+  </match>`;
+
+/**
  * Writes a self-contained fontconfig file that exposes ONLY the bundled font directory
  * and aliases the PDF base-14 font names to their URW base-35 equivalents. Passing this
  * via FONTCONFIG_FILE fully replaces the system fontconfig for that single process, so it
  * cannot leak into or be affected by the host's font setup.
+ *
+ * With `fontFallback` off — the default — the emitted file is byte-for-byte what previous
+ * versions wrote, so every existing caller renders exactly the same pixels.
+ *
+ * With `fontFallback` on, the file also carries the generic-family fallback layer that a
+ * full fontconfig installation would have provided. Without that layer a family this file
+ * does not name matches nothing, and fontconfig returns whatever sorts first in the bundled
+ * directory, which is `D050000L` — URW's ZapfDingbats clone. A customer PDF referencing
+ * non-embedded ArialNarrow and Tahoma therefore rendered its order lines, quantities and
+ * dimensions as dingbats while its aliased Arial runs rendered correctly, and pdftoppm
+ * exited 0 with no warning.
  */
-async function buildSubstituteFontConfig(tempDir: string, fontDir: string, id: string): Promise<{ confPath: string; cacheDir: string }> {
+export async function buildSubstituteFontConfig(
+  tempDir: string,
+  fontDir: string,
+  id: string,
+  fontFallback: boolean = false,
+): Promise<{ confPath: string; cacheDir: string }> {
   // fontconfig requires absolute paths in FONTCONFIG_FILE and inside <dir>/<cachedir>;
   // a relative path makes it fail with "Cannot load default config file" and silently
   // skip substitution, so resolve everything to absolute here.
@@ -73,19 +149,32 @@ async function buildSubstituteFontConfig(tempDir: string, fontDir: string, id: s
   const cacheDir = path.resolve(tempDir, `fc-cache-${id}`);
   await fs.mkdir(cacheDir, { recursive: true });
   const confPath = path.resolve(tempDir, `fonts-${id}.conf`);
+
+  // Everything below this point must stay byte-identical when fontFallback is off.
+  const base14 = [
+    aliasLine('Helvetica', 'Nimbus Sans'),
+    aliasLine('Arial', 'Nimbus Sans'),
+    aliasLine('Times', 'Nimbus Roman'),
+    aliasLine('Times New Roman', 'Nimbus Roman'),
+    aliasLine('Courier', 'Nimbus Mono PS'),
+    aliasLine('Courier New', 'Nimbus Mono PS'),
+    aliasLine('Symbol', 'Standard Symbols PS'),
+  ];
+  // Historical line, kept verbatim on the default path even though it matches no bundled
+  // font (see EXTRA_FAMILY_ALIASES); replacing it unconditionally would change output for
+  // callers who never asked for the new behaviour.
+  const legacyDingbats = aliasLine('ZapfDingbats', 'Dingbats');
+
+  const lines = fontFallback
+    ? [...base14, GENERIC_FALLBACK_RULE, ...EXTRA_FAMILY_ALIASES.map(([f, a]) => aliasLine(f, a))]
+    : [...base14, legacyDingbats];
+
   const conf = `<?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
 <fontconfig>
   <dir>${absFontDir}</dir>
   <cachedir>${cacheDir}</cachedir>
-  <alias binding="same"><family>Helvetica</family><accept><family>Nimbus Sans</family></accept></alias>
-  <alias binding="same"><family>Arial</family><accept><family>Nimbus Sans</family></accept></alias>
-  <alias binding="same"><family>Times</family><accept><family>Nimbus Roman</family></accept></alias>
-  <alias binding="same"><family>Times New Roman</family><accept><family>Nimbus Roman</family></accept></alias>
-  <alias binding="same"><family>Courier</family><accept><family>Nimbus Mono PS</family></accept></alias>
-  <alias binding="same"><family>Courier New</family><accept><family>Nimbus Mono PS</family></accept></alias>
-  <alias binding="same"><family>Symbol</family><accept><family>Standard Symbols PS</family></accept></alias>
-  <alias binding="same"><family>ZapfDingbats</family><accept><family>Dingbats</family></accept></alias>
+${lines.join('\n')}
 </fontconfig>
 `;
   await fs.writeFile(confPath, conf, 'utf8');
@@ -141,10 +230,11 @@ async function renderPdfPages(inputPath: string, id: string, options: ConvertPdf
     let execOptions: { env?: NodeJS.ProcessEnv } | undefined;
     if (options.substituteFonts) {
       const fontDir = options.fontDir ?? DEFAULT_FONT_DIR;
-      fontConf = await buildSubstituteFontConfig(TEMP_DIR, fontDir, id);
+      fontConf = await buildSubstituteFontConfig(TEMP_DIR, fontDir, id, options.fontFallback === true);
       // FONTCONFIG_FILE replaces the system config for this child process only.
       execOptions = { env: { ...process.env, FONTCONFIG_FILE: fontConf.confPath } };
-      console.log('Font substitution enabled, using font dir:', fontDir);
+      console.log('Font substitution enabled, using font dir:', fontDir,
+        options.fontFallback === true ? '(with generic fallback)' : '(base-14 aliases only)');
     }
 
     // Use pdftoppm directly to convert PDF to PNG

@@ -31,6 +31,10 @@ app.post('/convert', async (req, res) => {
   // Opt-in only. Absent param => false => identical behavior to previous versions.
   const substituteFonts = req.query.substituteFonts === 'true';
 
+  // Opt-in generic font fallback; only meaningful alongside substituteFonts. Absent means
+  // the generated fontconfig is exactly what previous versions wrote.
+  const fontFallback = req.query.fontFallback === 'true';
+
   // Opt-in only. Absent param => one stitched PNG, exactly as before.
   const perPage = req.query.perPage === 'true';
 
@@ -69,7 +73,7 @@ app.post('/convert', async (req, res) => {
     await fs.writeFile(inputPath, req.body);
 
     if (perPage) {
-      const pages = await convertPdfToPngPages(inputPath, scale, { substituteFonts, compressionLevel });
+      const pages = await convertPdfToPngPages(inputPath, scale, { substituteFonts, fontFallback, compressionLevel });
       pagePaths = pages.map(page => page.path);
 
       const encoded = await Promise.all(pages.map(async page => ({
@@ -82,7 +86,7 @@ app.post('/convert', async (req, res) => {
       return res.json({ count: encoded.length, pages: encoded });
     }
 
-    outputPath = await convertPdfToPng(inputPath, scale, { substituteFonts, compressionLevel });
+    outputPath = await convertPdfToPng(inputPath, scale, { substituteFonts, fontFallback, compressionLevel });
 
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Content-Disposition', 'attachment; filename="converted.png"');
